@@ -1,15 +1,25 @@
+%%writefile AirlineChatBot_project/deployment/app.py
 import os
 import gradio as gr
+from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_astradb import AstraDBVectorStore
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 
+# --- Load Environment Variables ---
+load_dotenv()
+
 # --- Configuration ---
 PDF_PATH = "FlykiteAirlinesHRP.pdf"
-FAISS_INDEX_PATH = "./faiss_hr_index"  # Local directory to save the FAISS index
+ASTRA_COLLECTION_NAME = "flykite_hr_policies"
+
+# Astra DB credentials
+ASTRA_API_ENDPOINT = os.getenv("ASTRA_DB_API_ENDPOINT")
+ASTRA_APPLICATION_TOKEN = os.getenv("ASTRA_DB_APPLICATION_TOKEN")
+ASTRA_KEYSPACE = os.getenv("ASTRA_DB_KEYSPACE", "default_keyspace")
 
 # LLM Configuration
 model_name_or_path = "TheBloke/Mistral-7B-Instruct-v0.2-GGUF"
@@ -37,28 +47,31 @@ def load_retriever():
         encode_kwargs={"normalize_embeddings": True},
     )
 
-    # Check if FAISS index already exists locally
-    if os.path.exists(FAISS_INDEX_PATH):
-        print("✅ Loading existing FAISS index from disk...")
-        # allow_dangerous_deserialization=True is required for local FAISS loading in newer LangChain
-        vector_store = FAISS.load_local(
-            FAISS_INDEX_PATH, 
-            embeddings, 
-            allow_dangerous_deserialization=True
-        )
-    else:
-        print("🔄 FAISS index not found. Ingesting PDF and building index...")
+    # Initialize Astra DB Vector Store
+    vector_store = AstraDBVectorStore(
+        collection_name=ASTRA_COLLECTION_NAME,
+        embedding=embeddings,
+        api_endpoint=ASTRA_API_ENDPOINT,
+        token=ASTRA_APPLICATION_TOKEN,
+        namespace=ASTRA_KEYSPACE,
+    )
+
+    # Auto-ingest if collection is empty
+    try:
+        dummy_check = vector_store.similarity_search("test_query_placeholder", k=1)
+    except Exception:
+        dummy_check = []
+
+    if not dummy_check:
+        print("🔄 Astra DB collection is empty. Ingesting PDF...")
         loader = PyPDFLoader(PDF_PATH)
         docs = loader.load()
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=256, chunk_overlap=20, encoding_name='cl100k_base'
         )
         chunks = splitter.split_documents(docs)
-        
-        # Create and save the FAISS index
-        vector_store = FAISS.from_documents(chunks, embeddings)
-        vector_store.save_local(FAISS_INDEX_PATH)
-        print("✅ PDF ingested and FAISS index saved locally!")
+        vector_store.add_documents(chunks)
+        print("✅ PDF ingested successfully into Astra DB!")
 
     return vector_store.as_retriever(search_kwargs={"k": 4})
 
@@ -80,7 +93,7 @@ def load_llm():
 
 
 # --- Global singletons (loaded once at startup) ---
-print("🔄 Loading retriever and LLM at startup...")
+print(" Loading retriever and LLM at startup...")
 retriever = load_retriever()
 llm = load_llm()
 print("✅ Models ready!")
@@ -110,7 +123,7 @@ def respond(message, history):
     # Append page references
     pages = sorted(set(doc.metadata.get("page", 0) + 1 for doc in docs))
     if pages:
-        answer += f"\n\n*📄 Referenced pages: {', '.join(str(p) for p in pages)}*"
+        answer += f"\n\n* Referenced pages: {', '.join(str(p) for p in pages)}*"
 
     return answer
 
@@ -140,18 +153,25 @@ with gr.Blocks(
         """
     )
 
-    # No credential check needed anymore since FAISS is local!
-    chatbot = gr.ChatInterface(
-        fn=respond,
-        examples=example_questions,
-        title="Chat with the HR Handbook",
-        description="Type a question or click an example below.",
-        retry_btn="🔄 Retry",
-        undo_btn="↩️ Undo",
-        clear_btn="️ Clear",
-        type="messages",   # modern message-style history
-        fill_height=True,
-    )
+    # Credential check
+    if not all([ASTRA_API_ENDPOINT, ASTRA_APPLICATION_TOKEN]):
+        gr.Error(
+            " Missing Astra DB credentials. "
+            "Please set `ASTRA_DB_API_ENDPOINT` and `ASTRA_DB_APPLICATION_TOKEN` "
+            "in your `.env` file."
+        )
+    else:
+        chatbot = gr.ChatInterface(
+            fn=respond,
+            examples=example_questions,
+            title="Chat with the HR Handbook",
+            description="Type a question or click an example below.",
+            retry_btn="🔄 Retry",
+            undo_btn="↩️ Undo",
+            clear_btn="️ Clear",
+            type="messages",   # modern message-style history
+            fill_height=True,
+        )
 
 if __name__ == "__main__":
     demo.launch(
