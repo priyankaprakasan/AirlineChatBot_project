@@ -1,0 +1,21 @@
+
+# UI Framework
+gradio>=5.0.0
+
+# Environment & Utilities
+python-dotenv
+tiktoken
+
+# LangChain & Vector Store
+langchain-huggingface
+langchain-astradb
+langchain-community
+langchain-text-splitters
+sentence-transformers
+
+# Document Loading
+pypdf
+
+# HuggingFace & LLM
+huggingface_hub
+llama-cpp-python
